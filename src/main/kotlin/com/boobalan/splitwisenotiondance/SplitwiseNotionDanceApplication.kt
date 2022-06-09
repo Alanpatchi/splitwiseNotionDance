@@ -2,6 +2,7 @@ package com.boobalan.splitwisenotiondance
 
 import com.boobalan.splitwisenotiondance.common.TransactionData
 import com.boobalan.splitwisenotiondance.notion.*
+import com.boobalan.splitwisenotiondance.notion.SplitwiseUtils.Companion.retryIO
 import com.boobalan.splitwisenotiondance.splitwise.Expense
 import com.boobalan.splitwisenotiondance.splitwise.ExpenseInfo
 import com.boobalan.splitwisenotiondance.splitwise.User
@@ -41,7 +42,7 @@ import java.time.*
 import java.util.*
 
 
-private val log = KotlinLogging.logger {}
+public val log = KotlinLogging.logger {}
 
 
 @SpringBootApplication
@@ -164,6 +165,7 @@ class OAuth2WebClientController(private val webClient: WebClient, private val ob
     //    }
     @GetMapping("/splitwise/user")
     suspend fun getSplitwiseCurrentUser(): ResponseEntity<*> {
+
         // @formatter:off
         val responseString = webClient
             .get()
@@ -184,7 +186,7 @@ class OAuth2WebClientController(private val webClient: WebClient, private val ob
         ).build<Any?>()
     }
 
-    @GetMapping("/splitwise/expense")
+    @GetMapping("/splitwise/expense/withretry")  // todo this throws exception
     suspend fun getLimitedExpenseForSplitwise(
         @RequestParam(value = "limit", defaultValue = "20") limit: Int,
         @RequestParam(value = "offset", defaultValue = "0") offset: Int,
@@ -199,7 +201,28 @@ class OAuth2WebClientController(private val webClient: WebClient, private val ob
         val datedBefore =
             ZonedDateTime.of(LocalDate.parse(dated_before), LocalTime.MIN, ZoneId.of("America/Los_Angeles")).toInstant()
 
+        return retryIO { // todo the client authorization request page from splitwise doesn't surface upto webflux, why? ask a question in stackoverflow
+            getExpenseFromSplitwiseAPI(datedAfter, datedBefore, limit, offset)
+        }
+    }
+
+    @GetMapping("/splitwise/expense/plain")
+    suspend fun getLimitedExpenseForSplitwisePlain(
+        @RequestParam(value = "limit", defaultValue = "20") limit: Int,
+        @RequestParam(value = "offset", defaultValue = "0") offset: Int,
+        @RequestParam(value = "dated_after", required = true) dated_after: String,
+        @RequestParam(value = "dated_before", required = true) dated_before: String
+    ): ExpenseInfo {
+
+//        Instant datedAfter = ZonedDateTime.of(LocalDate.of(2022, Month.JANUARY, 1), LocalTime.MIN, ZoneId.of("America/Los_Angeles")).toInstant();
+        val datedAfter =
+            ZonedDateTime.of(LocalDate.parse(dated_after), LocalTime.MIN, ZoneId.of("America/Los_Angeles")).toInstant()
+        //        Instant datedBefore = ZonedDateTime.of(LocalDate.of(2022, Month.MAY, 23), LocalTime.MIN, ZoneId.of("America/Los_Angeles")).toInstant();
+        val datedBefore =
+            ZonedDateTime.of(LocalDate.parse(dated_before), LocalTime.MIN, ZoneId.of("America/Los_Angeles")).toInstant()
+
         return getExpenseFromSplitwiseAPI(datedAfter, datedBefore, limit, offset)
+
     }
 
     private suspend fun getExpenseFromSplitwiseAPI(
@@ -237,8 +260,9 @@ class OAuth2WebClientController(private val webClient: WebClient, private val ob
         var currentPageIndex = 0;
             do {
                 val expenseInfo = getLimitedExpenseForSplitwise(limit, offset + (currentPageIndex++ * limit) , dated_after, dated_before)
+
                 emit(expenseInfo)
-                delay(500)
+//                delay(500)
                 val endOfList = expenseInfo.expenses?.size!! < limit
             } while (!endOfList)
 
@@ -375,7 +399,7 @@ class OAuth2WebClientController(private val webClient: WebClient, private val ob
         processedExpenseDataFromSplitwise
             // todo to ask question in stackoverflow comparing Flux.delayElements and onEach { delay(500) }
             // to satisfy throttle limit of webclient apis
-            .onEach { delay(500) }
+//            .onEach { delay(500) }
             .map {
                 val propertiesNode = transactionDataToPropertiesNode(it)
                 val notionPage: NotionPage = NotionPage()
@@ -415,22 +439,26 @@ class OAuth2WebClientController(private val webClient: WebClient, private val ob
             true
         )
 
-    private suspend fun createPageInNotion(notionPage: NotionPage) = webClient
-        .post()
-        .uri(
-            HTTPS_API_NOTION_COM_V_1
-        ) { uriBuilder: UriBuilder ->
-            uriBuilder.path("/pages").build()
+    private suspend fun createPageInNotion(notionPage: NotionPage): String {
+        return retryIO {
+            webClient
+                .post()
+                .uri(
+                    HTTPS_API_NOTION_COM_V_1
+                ) { uriBuilder: UriBuilder ->
+                    uriBuilder.path("/pages").build()
+                }
+                .body(
+                    BodyInserters.fromValue<Any>(
+                        notionPage
+                    )
+                )
+                .header("Notion-Version", "2022-02-22")
+                .attributes(ServerOAuth2AuthorizedClientExchangeFilterFunction.clientRegistrationId("notion"))
+                .retrieve()
+                .awaitBody<String>()
         }
-        .body(
-            BodyInserters.fromValue<Any>(
-                notionPage
-            )
-        )
-        .header("Notion-Version", "2022-02-22")
-        .attributes(ServerOAuth2AuthorizedClientExchangeFilterFunction.clientRegistrationId("notion"))
-        .retrieve()
-        .awaitBody<String>()
+    }
 
     private fun doesTheUserOweMoney(netBalance: BigDecimal) = netBalance < BigDecimal.ZERO
 
