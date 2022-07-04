@@ -11,6 +11,9 @@ import com.fasterxml.jackson.core.JsonProcessingException
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.node.ObjectNode
+import com.jayway.jsonpath.Criteria
+import com.jayway.jsonpath.Filter.filter
+import com.jayway.jsonpath.JsonPath
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import mu.KotlinLogging
@@ -147,6 +150,8 @@ class HelloController(private val webClient: WebClient) {
     }
 }
 
+private const val NOTION_DATABASE_NAME = "Expense Log"
+
 @RestController
 @RequestMapping(path = ["/webclient", "/public/webclient"])
 class OAuth2WebClientController(private val webClient: WebClient, private val objectMapper: ObjectMapper) {
@@ -272,7 +277,7 @@ class OAuth2WebClientController(private val webClient: WebClient, private val ob
 
 
     @GetMapping("/notion/search")
-    suspend fun searchForDatabaseInNotion(): NotionSearchResult {
+    suspend fun searchForDatabaseInNotion(): List<NotionDatabase>? {
 
         // todo set global throttle limit for api calls
         val notionSearchResult = webClient
@@ -280,11 +285,18 @@ class OAuth2WebClientController(private val webClient: WebClient, private val ob
             .uri("$HTTPS_API_NOTION_COM_V_1/search")
             .header("Notion-Version", "2022-02-22")
             .attributes(ServerOAuth2AuthorizedClientExchangeFilterFunction.clientRegistrationId("notion"))
-            .bodyValue(Query("Test Log", Filter("object", "database")))
+            .bodyValue(Query(NOTION_DATABASE_NAME, Filter("object", "database")))
             .retrieve()
             .awaitBody<NotionSearchResult>();
 
-        return notionSearchResult.also { log.debug { it.toString() } }
+
+        val notionDatabases: List<NotionDatabase>? = notionSearchResult
+            .results
+            ?.filter { it.title[0].plain_text == NOTION_DATABASE_NAME }
+
+        assert(notionDatabases?.size == 1)
+
+        return notionDatabases.also { log.debug { it.toString() } }
 
 
     }
@@ -292,9 +304,17 @@ class OAuth2WebClientController(private val webClient: WebClient, private val ob
     @GetMapping("/notion/database")
     suspend fun getNotionDatabasePagesDetail(): NotionDatabasePageList {
         // @formatter:off
-        val notionSearchResult: NotionSearchResult = searchForDatabaseInNotion()
+//        val notionSearchResult: NotionSearchResult = searchForDatabaseInNotion()
 
-        assert(notionSearchResult.results?.size == 1)
+//        val node = objectMapper.convertValue(notionSearchResult, JsonNode::class.java)
+//
+//        node.at("results")
+
+//        JsonPath.parse(notionSearchResult).read<>("$.results[?]", filter(Criteria.where("title").))
+
+        val notionDatabases: List<NotionDatabase>? = searchForDatabaseInNotion()
+
+        assert(notionDatabases?.size == 1)
 
         return webClient
             .post()
@@ -303,7 +323,7 @@ class OAuth2WebClientController(private val webClient: WebClient, private val ob
             ) { uriBuilder: UriBuilder ->
                 uriBuilder.path("/databases/{database_id}/query")
                     .build(
-                        notionSearchResult.results?.get(0)?.id
+                        notionDatabases?.get(0)?.id
                             ?: throw IllegalArgumentException("notion database cannot be null ")
                     )
             }
@@ -427,10 +447,10 @@ class OAuth2WebClientController(private val webClient: WebClient, private val ob
         val notionSearchResult = searchForDatabaseInNotion()
 
         assert(
-            (notionSearchResult.results?.size
+            (notionSearchResult?.size
                 ?: throw IllegalArgumentException("notion search result cannot be null")) == 1
         )
-        return notionSearchResult.results[0].id
+        return notionSearchResult[0].id
     }
 
     private fun isExpenseAutocreatedBySplitwise(expense: Expense) =
